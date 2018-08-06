@@ -56,7 +56,6 @@ I3D Configurations:
             self.input_std = [0.229, 0.224, 0.225]
         elif 'S3DG' in base_model:
             self.base_model = getattr(models,base_model)(num_classes=self.num_class)
-            print('[Debug] base_model:{}'.format(self.base_model))
         #    self.base_model.last_layer_name = 'softmax'
             self.input_size = 224
             self.input_mean = [0.485, 0.456, 0.406]

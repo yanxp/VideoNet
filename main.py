@@ -43,6 +43,7 @@ def main():
         else:
             print(("=> no finetune model found at '{}'".format(args.finetune)))
     
+
     if args.pretrained:
         if os.path.isfile(args.pretrained):
             state_dict = load_pretrained(i3d_model.base_model,args.pretrained)

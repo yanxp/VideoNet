@@ -17,6 +17,7 @@ class BasicConv3d(nn.Module):
         x = self.relu(x)
         return x
 
+
 class STConv3d(nn.Module):
     def __init__(self,in_planes,out_planes,kernel_size,stride,padding=0):
         super(STConv3d, self).__init__()
