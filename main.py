@@ -1,3 +1,4 @@
+import argparse
 import os
 import time
 import shutil
@@ -6,20 +7,22 @@ import torchvision
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim
+import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm
 
-from dataset import I3DDataSet
-from i3d import I3DModel
+from dataset import RSDataSet
+from models.shufflenet import ShuffleNet
 from transforms import *
 from opts import parser
 from utils import *
 
+
 best_prec1 = 0
+
 
 def main():
     global args, best_prec1
     args = parser.parse_args()
-
     if args.dataset == 'ucf101':
         num_class = 101
     elif args.dataset == 'hmdb51':
@@ -31,103 +34,97 @@ def main():
     else:
         raise ValueError('Unknown dataset '+args.dataset)
 
-    i3d_model = I3DModel(num_class, args.sample_frames, args.modality,
-                         base_model=args.arch, dropout=args.dropout)
-   
+
+    # create model
+    model = ShuffleNet(num_classes=num_class)
+    model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
     if args.finetune:
         if os.path.isfile(args.finetune):
-            state_dict = torch.load(args.finetune)['state_dict']
-            new_params = finetune(state_dict,i3d_model,num_class)
-            i3d_model.load_state_dict(new_params)
-            print('==> start finetuning from kinetics dataset')
+            state_dict = finetune(args.finetune,num_class)
+            model.load_state_dict(state_dict)
+            print('==> start finetuning from ImageNet dataset')
         else:
             print(("=> no finetune model found at '{}'".format(args.finetune)))
-    
-
-    if args.pretrained:
-        if os.path.isfile(args.pretrained):
-            state_dict = load_pretrained(i3d_model.base_model,args.pretrained)
-            i3d_model.base_model.load_state_dict(state_dict)
-     
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print(("=> loading checkpoint '{}'".format(args.resume)))
-            checkpoint = torch.load(args.resume)
-            args.start_epoch = checkpoint['epoch']
-            best_prec1 = checkpoint['best_prec1']
-            i3d_model.load_state_dict(checkpoint['state_dict'])
-            print(("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.evaluate, checkpoint['epoch'])))
-        else:
-            print(("=> no checkpoint found at '{}'".format(args.resume)))
-    cudnn.benchmark = False
-    # Data loading code
-    input_mean = i3d_model.input_mean
-    input_std = i3d_model.input_std
-    policies = i3d_model.get_optim_policies()
-    train_augmentation = i3d_model.get_augmentation(mode='train')
-    val_trans = i3d_model.get_augmentation(mode='val')
-    normalize = GroupNormalize(input_mean, input_std)
-
-    i3d_model = torch.nn.DataParallel(i3d_model, device_ids=args.gpus).cuda()
-    train_loader = torch.utils.data.DataLoader(
-        I3DDataSet("", args.train_list,
-                   sample_frames=args.sample_frames,
-                   modality=args.modality,
-                   image_tmpl="img_{:05d}.jpg" if args.modality in ["RGB", "RGBDiff"] else args.flow_prefix+"{}_{:05d}.jpg",
-                   transform=torchvision.transforms.Compose([
-                       train_augmentation,
-                       Stack(),
-                       ToTorchFormatTensor(),
-                       normalize,
-                   ])),
-        batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=True)
-
-    val_loader = torch.utils.data.DataLoader(
-       I3DDataSet("", args.val_list,
-                   sample_frames=args.sample_frames,
-                   modality=args.modality,
-                   image_tmpl="img_{:05d}.jpg" if args.modality in ["RGB", "RGBDiff"] else args.flow_prefix+"{}_{:05d}.jpg",
-                   transform=torchvision.transforms.Compose([
-                       val_trans,
-                       Stack(),
-                       ToTorchFormatTensor(),
-                       normalize,
-                   ])),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
 
     # define loss function (criterion) and optimizer
     if args.loss_type == 'nll':
         criterion = torch.nn.CrossEntropyLoss().cuda()
     else:
         raise ValueError("Unknown loss type")
-
-    if args.arch == 'S3DG':
-        criterion = torch.nn.NLLLoss().cuda()
-
-    for group in policies:
-        print(('group: {} has {} params, lr_mult: {}, decay_mult: {}'.format(
-            group['name'], len(group['params']), group['lr_mult'], group['decay_mult'])))
-
-    optimizer = torch.optim.SGD(policies, args.lr,
+    
+    optimizer = torch.optim.SGD(model.parameters(),
+                                args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+ 
+    # optionally resume from a checkpoint
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print(("=> loading checkpoint '{}'".format(args.resume)))
+            checkpoint = torch.load(args.resume)
+            args.start_epoch = checkpoint['epoch']
+            best_prec1 = checkpoint['best_prec1']
+            model.load_state_dict(checkpoint['state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            print(("=> loaded checkpoint '{}' (epoch {})"
+                  .format(args.evaluate, checkpoint['epoch'])))
+        else:
+            print(("=> no checkpoint found at '{}'".format(args.resume)))
+    
+    cudnn.benchmark = True
+
+    # Data loading code
+    train_trans = torchvision.transforms.Compose([
+        GroupScale(256),                    
+        GroupRandomCrop(224),               
+        GroupToTensor(),              
+        GroupNormalize(                     
+            mean=[.485, .456, .406],        
+            std=[.229, .224, .225]          
+        )]                                  
+    )  
+    val_trans = torchvision.transforms.Compose([
+        GroupScale(256),                    
+        GroupCenterCrop(224),               
+        GroupToTensor(),              
+        GroupNormalize(                     
+            mean=[.485, .456, .406],        
+            std=[.229, .224, .225]          
+        )]                                  
+    )
+  
+    train_loader = torch.utils.data.DataLoader(
+        RSDataSet("", args.train_list, num_segments=args.num_segments,
+                  image_tmpl="img_{:05d}.jpg",
+                  transform=train_trans
+                  ),
+        batch_size=args.batch_size, shuffle=True,
+        num_workers=args.workers, pin_memory=True)
+
+    val_loader = torch.utils.data.DataLoader(
+        RSDataSet("", args.val_list, num_segments=args.num_segments,
+                  image_tmpl="img_{:05d}.jpg",
+                  transform=val_trans
+                  ),
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True)
+
 
     if args.evaluate:
-        validate(val_loader,i3d_model, criterion, 0)
+        validate(val_loader, model, criterion, 0)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
-        adjust_learning_rate(optimizer, epoch, args.lr_steps)
+        #adjust_learning_rate(optimizer, epoch, args.lr_steps)
+        scheduler.step()        
 
         # train for one epoch
-        train(train_loader, i3d_model, criterion, optimizer, epoch)
+        train(train_loader, model, criterion, optimizer, epoch)
 
         # evaluate on validation set
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
-            prec1 = validate(val_loader, i3d_model, criterion, (epoch + 1) * len(train_loader))
+            prec1 = validate(val_loader, model, criterion, (epoch + 1) * len(train_loader))
 
             # remember best prec@1 and save checkpoint
             is_best = prec1 > best_prec1
@@ -135,8 +132,9 @@ def main():
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
-                'state_dict': i3d_model.state_dict(),
+                'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
+                'optimizer' : optimizer.state_dict()
             }, is_best)
 
 
@@ -151,15 +149,19 @@ def train(train_loader, model, criterion, optimizer, epoch):
     model.train()
 
     end = time.time()
-    for i, (input, target) in enumerate(train_loader):
+    for i, (input, target,name) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
         target = target.cuda(async=True)
         input_var = torch.autograd.Variable(input)
         target_var = torch.autograd.Variable(target)
+
         # compute output
-        output = model(input_var)
+        output = torch.stack([model(input_var[:, i, :, :, :]) for i in range(args.num_segments)])
+        #output = model(input_var)
+        output = torch.mean(output, dim=0)
+        output = F.log_softmax(output, dim=1)
         loss = criterion(output, target_var)
 
         # measure accuracy and record loss
@@ -206,7 +208,7 @@ def validate(val_loader, model, criterion, iter, logger=None):
     model.eval()
 
     end = time.time()
-    for i, (input, target) in enumerate(val_loader):
+    for i, (input, target,name) in enumerate(val_loader):
         target = target.cuda(async=True)
         input_var = torch.autograd.Variable(input, volatile=True)
         target_var = torch.autograd.Variable(target, volatile=True)
@@ -242,10 +244,11 @@ def validate(val_loader, model, criterion, iter, logger=None):
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    filename = '_'.join((args.snapshot_pref, args.modality.lower(), filename))
+    filename = '_'.join((args.snapshot_pref, filename))
+    filename = os.path.join('save_models',filename)
     torch.save(state, filename)
     if is_best:
-        best_name = '_'.join((args.snapshot_pref, args.modality.lower(), 'model_best.pth.tar'))
+        best_name = '_'.join((args.snapshot_pref, 'model_best.pth.tar'))
         shutil.copyfile(filename, best_name)
 
 
@@ -267,14 +270,14 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def adjust_learning_rate(optimizer, epoch, lr_steps):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    decay = 0.1 ** (sum(epoch >= np.array(lr_steps)))
-    lr = args.lr * decay
-    decay = args.weight_decay
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr * param_group['lr_mult']
-        param_group['weight_decay'] = decay * param_group['decay_mult']
+#def adjust_learning_rate(optimizer, epoch, lr_steps):
+#    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+#    decay = 0.1 ** (sum(epoch >= np.array(lr_steps)))
+#    lr = args.lr * decay
+#    decay = args.weight_decay
+#    for param_group in optimizer.param_groups:
+#        param_group['lr'] = lr * param_group['lr_mult']
+#        param_group['weight_decay'] = decay * param_group['decay_mult']
 
 
 def accuracy(output, target, topk=(1,)):
