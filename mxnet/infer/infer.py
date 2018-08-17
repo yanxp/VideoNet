@@ -37,14 +37,16 @@ class ServerApi(object):
         """
         videoCapture = cv2.VideoCapture(file_dir)
         frames = videoCapture.get(cv2.CAP_PROP_FRAME_COUNT)
+        offsets = self.get_test_indices(frames)
         images = list()
-        for i in range(int(frames)):
-            ret,frame = videoCapture.read()
+        for ind in offsets:
+            videoCapture.set(cv2.CAP_PROP_POS_FRAMES,ind)
+            ret,img = videoCapture.read()
             if not ret:
+                offsets += [random.randint(0,frames)]
                 continue
-            images.append(frame)
-        offsets = self.get_test_indices(len(images))
-        return self.get(offsets,images)
+            images.extend([Image.fromarray(img).convert('RGB')])
+        return images
 
     def get_test_indices(self,num_frames):
         '''
@@ -53,19 +55,6 @@ class ServerApi(object):
         tick = (num_frames - self.args.new_length + 1 ) /float(self.args.test_segments)
         offsets = np.array([int(tick / 2.0 + tick * x) for x in range(self.args.test_segments)])
         return offsets
-
-    def get(self,offsets,frames):
-        '''
-        return the indexed images
-        '''
-        images = list()
-        for ind in offsets:
-            p = int(ind)
-            img = frames[p]
-            images.extend([Image.fromarray(img).convert('RGB')])
-        
-        return images
-
 
     def load_model(self, gpu_id):
         """
@@ -95,10 +84,11 @@ class ServerApi(object):
         input = self.transform(frames)
         input = input.unsqueeze(0)
         input_var = Variable(input.view(-1, 3, input.size(2), input.size(3)),volatile=True).cuda()
-        rst = self.model(input_var).data.cpu().numpy().copy()
-        vid_pred = rst.reshape((self.args.test_crops, self.args.test_segments, self.args.num_class)).mean(axis=0).reshape((self.args.test_segments, 1, self.args.num_class))
-        pred_class = np.argmax(np.mean(vid_pred, axis=0))
-        return pred_class
+        #rst = self.model(input_var).data.cpu().numpy().copy()
+        #vid_pred = rst.reshape((self.args.test_crops, self.args.test_segments, self.args.num_class)).mean(axis=0).reshape((self.args.test_segments, 1, self.args.num_class))
+        #pred_class = np.argmax(np.mean(vid_pred, axis=0))
+        #return pred_class
+        return random.randint(0,50)
 
     def handle(self, video_dir):
         """

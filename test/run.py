@@ -29,13 +29,15 @@ def verify_method(type):
             line = f.readline()
     # 视频处理
     result_list = []
+    video_list = video_list[:500]
     for i,video in enumerate(video_list):
         video_name = video.split('/')[-1]
         try:
             cla = int(server.handle(video))
-            print('total {}/{}'.format(i,len(video_list)))
+            #cnt_time = time.time() - start_time
+            #print('total {}/{},average {} sec/video'.format(i,len(video_list),float(cnt_time)/(i+1)))
         except Exception:
-            print('try exception !!!')
+            #print('try exception !!!')
             cla = -1        # -1代表预测异常
         result_list.append([video_name, cla])
     # 标签输出
@@ -65,7 +67,7 @@ def time_counter():
     for item in time_list[1: -1]:
         total += item
         num += 1
-    return total / (num * N)
+    return total / (num * (N-2))
 
 
 def acc_counter():
