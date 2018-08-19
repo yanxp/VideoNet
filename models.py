@@ -35,10 +35,10 @@ TSN Configurations:
     consensus_module:   {}
     dropout_ratio:      {}
         """.format(base_model, self.modality, self.num_segments, self.new_length, consensus_type, self.dropout)))
-
+        self.base_model_name = base_model
         self._prepare_base_model(base_model)
-
-        feature_dim = self._prepare_tsn(num_class)
+        if 'resnet' in base_model or 'BNInception' in base_model or 'MobileNetV2' in base_model :
+            feature_dim = self._prepare_tsn(num_class)
 
         if self.modality == 'Flow':
             print("Converting the ImageNet model to a flow init model")
@@ -78,7 +78,7 @@ TSN Configurations:
 
     def _prepare_base_model(self, base_model):
 
-        if 'resnet' in base_model or 'vgg' in base_model in 'squeezenet' in base_model:
+        if 'resnet' in base_model or 'vgg' in base_model or 'squeezenet' in base_model:
             self.base_model = getattr(torchvision.models, base_model)(True)
             self.base_model.last_layer_name = 'fc'
             self.input_size = 224
@@ -124,6 +124,12 @@ TSN Configurations:
             import tf_model_zoo
             self.base_model = getattr(tf_model_zoo,base_model)(groups=8)
             self.base_model.last_layer_name = 'fc'
+            self.input_size = 224
+            self.input_mean = [0.485, 0.456, 0.406]
+            self.input_std = [0.229, 0.224, 0.225]
+        elif 'ShuffleNetV2' == base_model :
+            import tf_model_zoo
+            self.base_model = getattr(tf_model_zoo,base_model)()
             self.input_size = 224
             self.input_mean = [0.485, 0.456, 0.406]
             self.input_std = [0.229, 0.224, 0.225]
@@ -210,8 +216,9 @@ TSN Configurations:
             sample_len = 3 * self.new_length
             input = self._get_diff(input)
         base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:]))
-        if self.dropout > 0:
-            base_out = self.new_fc(base_out)
+        if self.dropout >0 and ('resnet' in self.base_model_name or 'BNInception' in self.base_model_name or 'MobileNetV2' in self.base_model_name) :
+ 
+           base_out = self.new_fc(base_out)
 
         if not self.before_softmax:
             base_out = self.softmax(base_out)

@@ -9,7 +9,8 @@ import torch.backends.cudnn as cudnn
 import torch.optim
 from torch.nn.utils import clip_grad_norm
 
-from dataset import TSNDataSet
+from datasetcache import TSNDataSet
+#from dataset import TSNDataSet
 from models import TSN
 from transforms import *
 from opts import parser
@@ -57,6 +58,11 @@ def main():
         new_params = loadMobileNetV2(state_dict,model,num_class)
         model.load_state_dict(new_params)
 
+    if args.arch  == 'ShuffleNetV2':
+        state_dict = torch.load('model/shufflenet_v2_x0.33.pth')
+        new_params = loadShuffleNetV2(state_dict,model,num_class)
+        model.load_state_dict(new_params)
+        
     if args.arch  == 'ShuffleNet':
         state_dict = torch.load('model/ShuffleNet_1g8_Top1_67.408_Top5_87.258.pth.tar')
         new_params = loadShuffleNet(state_dict,model,num_class)
@@ -119,6 +125,10 @@ def main():
     # define loss function (criterion) and optimizer
     if args.loss_type == 'nll':
         criterion = torch.nn.CrossEntropyLoss().cuda()
+
+    elif args.loss_type == 'focal':
+        criterion = FocalLoss(num_class=num_class,gamma=2).cuda()
+
     else:
         raise ValueError("Unknown loss type")
 
@@ -182,6 +192,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         # compute output
         output = model(input_var)
+        
         loss = criterion(output, target_var)
 
         # measure accuracy and record loss

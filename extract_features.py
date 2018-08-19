@@ -10,6 +10,8 @@ from dataset import TSNDataSet
 from models import TSN
 from transforms import *
 from ops import ConsensusModule
+import pickle as pkl
+import os
 
 # options
 parser = argparse.ArgumentParser(
@@ -20,7 +22,7 @@ parser.add_argument('test_list', type=str)
 parser.add_argument('weights', type=str)
 parser.add_argument('--arch', type=str, default="resnet101")
 parser.add_argument('--save_scores', type=str, default=None)
-parser.add_argument('--test_segments', type=int, default=3)
+parser.add_argument('--test_segments', type=int, default=6)
 parser.add_argument('--max_num', type=int, default=-1)
 parser.add_argument('--test_crops', type=int, default=1)
 parser.add_argument('--input_size', type=int, default=224)
@@ -47,6 +49,14 @@ elif args.dataset == 'meitu':
 else:
     raise ValueError('Unknown dataset '+args.dataset)
 
+#中间特征提取
+class FeatureExtractor(nn.Module):
+    def __init__(self, submodule):
+        super(FeatureExtractor,self).__init__()
+        self.submodule = submodule
+    def forward(self, x):
+        return self.submodule.base_model(x)
+
 net = TSN(num_class, 1, args.modality,
           base_model=args.arch,
           consensus_type=args.crop_fusion_type,before_softmax=True,
@@ -56,8 +66,6 @@ checkpoint = torch.load(args.weights)
 print("model epoch {} best prec@1: {}".format(checkpoint['epoch'], checkpoint['best_prec1']))
 
 base_dict = {'.'.join(k.split('.')[1:]): v for k,v in list(checkpoint['state_dict'].items())}
-
-net.load_state_dict(base_dict)
 
 if args.test_crops == 1:
     cropping = torchvision.transforms.Compose([
@@ -96,6 +104,7 @@ def softmax(x):
     softmax_x = exp_x / np.sum(exp_x)
     return softmax_x
 
+net=FeatureExtractor(net)
 net = torch.nn.DataParallel(net)
 net.eval()
 
@@ -121,10 +130,13 @@ def eval_video(video_data):
 
     input_var = torch.autograd.Variable(data.view(-1, length, data.size(2), data.size(3)),
                                         volatile=True)
-    rst = net(input_var).data.cpu().numpy().copy()
-    return i, rst.reshape((num_crop, args.test_segments, num_class)).mean(axis=0).reshape(
-        (args.test_segments, 1, num_class)
-    ), label[0]
+
+    return net(input_var).data.cpu().numpy().copy()
+
+   # rst = net(input_var).data.cpu().numpy().copy()
+   # return i, rst.reshape((num_crop, args.test_segments, num_class)).mean(axis=0).reshape(
+   #     (args.test_segments, 1, num_class)
+   # ), label[0]
 
 
 proc_start_time = time.time()
@@ -134,16 +146,19 @@ for i, (data,label,name) in data_gen:
     if i >= max_num:
         break
     rst = eval_video((i, data, label))
-    output.append(rst[1:])
+    output.append(rst)
     video_name.append(name)
     cnt_time = time.time() - proc_start_time
     print('video {} done, total {}/{}, average {} sec/video'.format(i, i+1,
                                                                     total_num,
                                                                     float(cnt_time) / (i+1)))
-    averagetime = float(cnt_time) / (i+1)
+#train_data = {'name':video_name,'feature':output}
+for i,name in enumerate(video_name):
+    pkl.dump(output[i], open(os.path.join('train_features',name[0]+'.pkl'), "wb"))
 
+'''
 video_pred = [np.argmax(np.mean(x[0], axis=0)) for x in output]
-fs = open('rgbdiff_val_before_softmax.txt','w')
+fs = open('category_val_before_softmax.txt','w')
 for i,x in enumerate(output):
     out = np.mean(x[0], axis=0)[0]
     #out = softmax(out)
@@ -198,3 +213,4 @@ with open('results/'+args.save_scores+'_per_class.txt','w') as fs:
         fs.write('{} {:.02f} \n'.format(d[i],cls_acc[i]))
     fs.write('Average accuracy {:.02f}%'.format(np.mean(cls_acc) * 100))
     fs.close()
+'''
